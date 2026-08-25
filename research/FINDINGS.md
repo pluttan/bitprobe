@@ -75,11 +75,38 @@ front, but the inherited drift dominates from block 3 onward and grows to 0.64
 by the end. Perplexity lands at 7044 — 131x better than the solver, still 427x
 short of Bonsai.
 
+## Second pass: corpus and learned scales
+
+An ablation on block 0, each variant starting from the untouched weights and
+scored on the same held-out text:
+
+| variant | block error |
+|---|---|
+| naive binarisation | 0.8690 |
+| signs, 40k tokens | 0.5042 |
+| signs, 40M tokens | 0.3883 |
+| signs and scales, 40M tokens | 0.3652 |
+| scales only, 40M tokens | 0.5403 |
+
+Data is the larger lever, but the scale is not free either — which fits Bonsai's
+scales running at twice the naive value. Retraining all 28 blocks with both, and
+with fresh windows drawn per block, roughly halves the block error at every
+depth (0.2007 at block 3 against 0.4316; 0.4606 at block 27 against 0.6379) and
+brings perplexity to 1679.58.
+
+| model | perplexity |
+|---|---|
+| Qwen3-1.7B, fp16 | 12.32 |
+| Bonsai, 1 bit | 16.53 |
+| ours, solver | 923707.44 |
+| ours, trained signs | 7044.33 |
+| ours, corpus and learned scales | 1679.58 |
+
 ## What closes the rest of the gap
 
 Per-block distillation cannot: each block only compensates the drift it
-inherits, and the drift accumulates faster than 1200 steps per block remove it.
-The training set here is 40k tokens seen 1200 times over.
+inherits, and the block error still climbs from 0.20 at depth 3 to 0.52 at depth
+23 no matter how well each block is fitted in isolation.
 
 What Bonsai did, and what remains to do, is end-to-end distillation against the
 teacher's logits over a real corpus. For a 1.7B model that is roughly

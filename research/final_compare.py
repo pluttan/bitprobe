@@ -36,7 +36,8 @@ def main():
     del model
 
     for label, path in (("ours: solver", "/tmp/quantized_model.safetensors"),
-                        ("ours: trained", "/tmp/trained_model.safetensors")):
+                        ("ours: trained", "/tmp/trained_model.safetensors"),
+                        ("ours: trained v2", "/tmp/trained2_model.safetensors")):
         model, _ = load("Qwen/Qwen3-1.7B")
         model.load_weights(path, strict=False)
         mx.eval(model.parameters())
