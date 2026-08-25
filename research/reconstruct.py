@@ -58,6 +58,40 @@ def layer0_input(base: str, token_ids: np.ndarray) -> np.ndarray:
 # ===  Binary reconstruction ===
 # ==============================
 
+def exact_group_scales(w: np.ndarray, b: np.ndarray, hessian: np.ndarray,
+                       damping: float = 1e-3) -> np.ndarray:
+    """Exact per-group scales for fixed signs.
+
+    With signs held, the objective is quadratic in the scales, so the optimum
+    solves A s = c with A[g,h] = B_g' H B_h and c[g] = B_g' H w, where B_g is
+    the sign vector restricted to group g. Dropping the off-diagonal blocks of
+    A — as the cheap approximation does — throws away the correlation between
+    groups and produces scales that make the solution worse, not better.
+
+    Sixteen groups per row means a 16x16 solve per output channel, which is
+    negligible; the cost is building A from the Hessian blocks.
+    """
+    out, width = w.shape
+    groups = width // GROUP
+
+    bg = b.reshape(out, groups, GROUP)
+    hblk = hessian.reshape(groups, GROUP, groups, GROUP).transpose(0, 2, 1, 3)
+
+    # A[o,g,h] = bg[o,g] . hblk[g,h] . bg[o,h]
+    partial = np.einsum("ogi,ghij->oghj", bg, hblk, optimize=True)
+    a = np.einsum("oghj,ohj->ogh", partial, bg, optimize=True)
+
+    hw = (w @ hessian).reshape(out, groups, GROUP)
+    c = (bg * hw).sum(axis=2)
+
+    # Damping keeps the solve stable when groups are nearly collinear.
+    trace = np.einsum("ogg->o", a) / groups
+    a = a + np.eye(groups, dtype=a.dtype) * (damping * trace)[:, None, None]
+
+    scales = np.linalg.solve(a, c[:, :, None])[:, :, 0]
+    return scales
+
+
 def group_scales(w: np.ndarray, b: np.ndarray, hessian: np.ndarray) -> np.ndarray:
     """Scale per group that minimises output error, not weight error.
 
@@ -98,8 +132,9 @@ def reconstruct(w: np.ndarray, hessian: np.ndarray, sweeps: int = 3,
     out, width = w.shape
     b = np.sign(w)
     b[b == 0] = 1.0
-    scales = (np.abs(w.reshape(out, -1, GROUP)).mean(axis=2)
-              if not update_scales else group_scales(w, b, hessian))
+    scales = np.abs(w.reshape(out, -1, GROUP)).mean(axis=2)
+    if update_scales:
+        scales = exact_group_scales(w, b, hessian)
 
     diag = np.diag(hessian).copy()
     residual = expand(scales, width) * b - w
@@ -122,7 +157,12 @@ def reconstruct(w: np.ndarray, hessian: np.ndarray, sweeps: int = 3,
             flipped += int(take.sum())
 
         if update_scales:
-            scales = group_scales(w, b, hessian)
+            candidate = exact_group_scales(w, b, hessian)
+            trial = expand(candidate, width) * b - w
+            # Accept only if the exact solve actually lowers the objective;
+            # a damped solve can overshoot on ill-conditioned rows.
+            if objective(trial, hessian) < objective(expand(scales, width) * b - w, hessian):
+                scales = candidate
         residual = expand(scales, width) * b - w
         grad = residual @ hessian
         print(f"  sweep {sweep + 1}: {flipped:>9} flips  objective={objective(residual, hessian):.4e}")
@@ -142,19 +182,33 @@ def main() -> None:
     tokens = np.load("/tmp/calib_tokens.npy")[:32768]
 
     print(f"calibration tokens: {len(tokens)}")
-    x = layer0_input(base, tokens)
-    print(f"activations: {x.shape}")
 
-    hessian = (x.T @ x) / len(x)
-    hessian += np.eye(hessian.shape[0], dtype=np.float32) * (1e-2 * np.trace(hessian) / hessian.shape[0])
-
-    w = remote.load(base, tensor)
+    # The Hessian is 16 MB while the embedding table it comes from is 600 MB,
+    # so it is worth keeping between runs.
+    cache = pathlib.Path("/tmp/layer0_cache.npz")
+    if cache.exists():
+        blob = np.load(cache)
+        hessian, x_ref, w = blob["hessian"], blob["x_ref"], blob["w"]
+        print(f"loaded cached Hessian {hessian.shape} and weights {w.shape}")
+    else:
+        x = layer0_input(base, tokens)
+        print(f"activations: {x.shape}")
+        hessian = (x.T @ x) / len(x)
+        hessian += np.eye(hessian.shape[0], dtype=np.float32) * (
+            1e-2 * np.trace(hessian) / hessian.shape[0])
+        w = remote.load(base, tensor)
+        x_ref = x[:4096]          # kept for the output-error check
+        np.savez(cache, hessian=hessian, x_ref=x_ref, w=w)
+        del x
+        print("cached Hessian for later runs")
+    x = x_ref
     fixed = "--fixed-scale" in sys.argv
     print(f"weights: {w.shape}\nrunning coordinate descent "
           f"({'fixed' if fixed else 'fitted'} scales)...")
     sweeps = int(next((a.split("=")[1] for a in sys.argv if a.startswith("--sweeps=")), 3))
     approx = reconstruct(w, hessian, sweeps=sweeps, update_scales=not fixed)
 
+    np.save("/tmp/recon_q_proj.npy", approx)
     naive = metrics.naive_binary(w, GROUP)
     print("\n=== result vs base weights ===")
     for label, m in (("reconstructed", approx), ("naive binary", naive)):
@@ -162,11 +216,41 @@ def main() -> None:
               f"signs={metrics.sign_agreement(m, w) * 100:5.1f}%  "
               f"scale={metrics.scale_ratio(m, w, GROUP):.3f}")
 
+    # The published model, measured on the same activations — without this the
+    # comparison is only against a straw baseline.
+    published = pathlib.Path("/tmp/bonsai_q_proj.npy")
+    rows = [("reconstructed", approx), ("naive binary", naive)]
+    if published.exists():
+        bonsai = np.load(published)
+        rows.append(("bonsai", bonsai))
+        print(f"  {'bonsai':14} cos={metrics.cosine(bonsai, w):+.4f}  "
+              f"signs={metrics.sign_agreement(bonsai, w) * 100:5.1f}%  "
+              f"scale={metrics.scale_ratio(bonsai, w, GROUP):.3f}")
+
     print("\n=== output error on calibration activations ===")
     ref = x @ w.T
-    for label, m in (("reconstructed", approx), ("naive binary", naive)):
+    for label, m in rows:
         err = np.linalg.norm(x @ m.T - ref) / np.linalg.norm(ref)
         print(f"  {label:14} relative output error = {err:.4f}")
+
+    # Bonsai rescaled the norms and quantized the embedding table, so its matrix
+    # is meant to consume its own activations. Feeding it Qwen's inputs
+    # understates it; this block gives each matrix the inputs it was built for.
+    bx = pathlib.Path("/tmp/bonsai_x.npy")
+    if published.exists() and bx.exists():
+        x_b = np.load(bx)
+        n = min(len(x), len(x_b))
+        ref = x[:n] @ w.T
+        print("\n=== honest comparison: each matrix on its own activations ===")
+        pairs = [
+            ("reconstructed", x[:n], approx),
+            ("naive binary", x[:n], naive),
+            ("bonsai (own acts)", x_b[:n], np.load(published)),
+            ("bonsai (qwen acts)", x[:n], np.load(published)),
+        ]
+        for label, inp, mat in pairs:
+            err = np.linalg.norm(inp @ mat.T - ref) / np.linalg.norm(ref)
+            print(f"  {label:20} relative output error = {err:.4f}")
 
     print("\n=== flips by magnitude (reconstructed) ===")
     for i, (lo, hi, rate) in enumerate(metrics.flip_by_magnitude(approx, w), 1):

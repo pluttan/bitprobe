@@ -21,7 +21,23 @@ _HEADERS: dict[str, dict] = {}
 # ===  Raw byte transport    ===
 # ==============================
 
+CHUNK = 48 << 20  # a single range read of hundreds of MB gets cut by the CDN
+
+
 def _get(url: str, start: int, length: int, tries: int = 4) -> bytes:
+    """Fetch a byte range, splitting large reads into chunks."""
+    if length > CHUNK:
+        parts = []
+        offset = 0
+        while offset < length:
+            size = min(CHUNK, length - offset)
+            parts.append(_get_one(url, start + offset, size, tries))
+            offset += size
+        return b"".join(parts)
+    return _get_one(url, start, length, tries)
+
+
+def _get_one(url: str, start: int, length: int, tries: int = 4) -> bytes:
     """Fetch a byte range, retrying on transient network failures.
 
     Range reads against the CDN fail sporadically under load; a plain retry
@@ -43,8 +59,17 @@ def _get(url: str, start: int, length: int, tries: int = 4) -> bytes:
 
 def _shards(repo: str) -> list[str]:
     """List the safetensors files of a repository."""
-    with urllib.request.urlopen(f"{HF}/api/models/{repo}", timeout=60) as resp:
-        meta = json.load(resp)
+    last = None
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(f"{HF}/api/models/{repo}", timeout=60) as resp:
+                meta = json.load(resp)
+            break
+        except Exception as exc:  # noqa: BLE001 - retried, re-raised below
+            last = exc
+            time.sleep(3 * (attempt + 1))
+    else:
+        raise RuntimeError(f"cannot list shards of {repo}: {last}")
     names = [
         f["rfilename"]
         for f in meta.get("siblings", [])
