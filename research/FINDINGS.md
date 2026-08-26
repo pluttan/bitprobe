@@ -113,3 +113,36 @@ teacher's logits over a real corpus. For a 1.7B model that is roughly
 8 FLOPs per parameter per token — around 1.4e20 FLOPs for 10B tokens, or about a
 day on twelve A100s at 40% utilisation, and a few days for the 30–50B tokens the
 last of the gap would need.
+
+## Running it on real hardware
+
+`research/distill_cluster.py` is the same recipe without the laptop's limits:
+the loss is on the logits, so the whole network is in the graph and no block is
+fitted blind to what follows it.
+
+```
+torchrun --nproc_per_node=12 distill_cluster.py \
+    --corpus /data/fineweb_tokens.npy \
+    --init /tmp/trained2_master.safetensors \
+    --tokens 10e9
+```
+
+Budget, at 8 FLOPs per parameter per token (six for the student's forward and
+backward, two for the teacher's forward):
+
+| tokens | FLOPs | 12x A100 at 40% |
+|---|---|---|
+| 10B | 1.4e20 | ~25 hours |
+| 30B | 4.1e20 | ~3 days |
+
+Memory per rank is about 25 GB — student in fp32 with Adam state, teacher in
+bf16 — so plain DDP suffices on 40 GB cards and there is no need for sharding.
+
+Two things this script does not do. It leaves the embedding table in full
+precision, where Bonsai binarises it; that costs 622 MB of the deployed model
+and is worth adding once the gap is closed rather than before. And it starts
+from the per-block result rather than from the base model — worth measuring
+both ways, since the per-block stage may have settled into signs that a longer
+run would have to undo.
+
+The script has not been executed: this machine has no CUDA device.
