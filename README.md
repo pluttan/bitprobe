@@ -86,6 +86,13 @@ model.layers.0.mlp.gate_proj.weight  [256, 2048]
 `--rows` controls how many rows are sampled per tensor (default 256, `0` for the whole
 tensor) and `--group` sets the scaling group size (default 128).
 
+## ■ Training a binary model
+
+The recipe these measurements pointed at — binary signs through a straight-through
+estimator, a learned scale per group, and a loss on the logits rather than per block —
+is implemented in a separate project:
+[bindistill](https://github.com/pluttan/bindistill).
+
 ## ■ License
 
 MIT © [pluttan](https://github.com/pluttan)
