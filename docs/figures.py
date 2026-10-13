@@ -368,11 +368,39 @@ def fig_memory():
     save(fig, "memory.png")
 
 
+def fig_cover():
+    """Feed cover, exactly 780x440 as Habr asks: full-bleed, no transparent corners."""
+    fig = plt.figure(figsize=(7.8, 4.4), dpi=100, facecolor=C["card"])
+    fig.text(0.06, 0.86, "Однобитная Bonsai:", fontsize=27, fontweight="bold", va="top")
+    fig.text(0.06, 0.74, "квантизация или обучение?", fontsize=27, fontweight="bold",
+             va="top", color=C["bonsai"])
+    fig.text(0.06, 0.6, "что видно по весам и как получить\nтакую модель дистилляцией",
+             fontsize=13.5, color=C["muted"], va="top", linespacing=1.35)
+    ax = fig.add_axes([0.56, 0.08, 0.4, 0.36])
+    ax.set_facecolor("none")
+    x = range(1, 11)
+    for key in ("bonsai", "mine"):
+        ax.plot(x, FLIPS[key], color=C[key], lw=4, solid_capstyle="round", zorder=3)
+        ax.scatter(x, FLIPS[key], s=40, color=C[key], edgecolor=C["card"], lw=1.5, zorder=4)
+    ax.set_yscale("log")
+    ax.set_ylim(0.01, 80)
+    ax.grid(axis="y", color=C["grid"], lw=1)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    bare(ax)
+    fig.text(0.06, 0.1, "1 бит на вес  ·  перплексия 16,5 против 12,3 у Qwen", fontsize=12,
+             color=C["ink"], va="bottom")
+    OUT.mkdir(exist_ok=True)
+    fig.savefig(OUT / "cover.png", dpi=100, facecolor=C["card"])
+    plt.close(fig)
+    print("  cover.png")
+
+
 def main():
     style()
     print(f"рисую в {OUT}")
     for fig in (fig_perplexity, fig_overfit, fig_flips, fig_ablation,
-                fig_curve, fig_agreement, fig_memory):
+                fig_curve, fig_agreement, fig_memory, fig_cover):
         fig()
 
 
